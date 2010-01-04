@@ -6,8 +6,12 @@ use utf8;
 use Encode;
 
 use Carp;
-use Win32::OLE;
+
+#use Win32::OLE;
+use Archive::Zip qw(:ERROR_CODES :CONSTANTS);
+
 use XML::Twig;
+use Date::Calc;
 use Net::LDAP;
 use Net::LDAP::LDIF;
 use Net::LDAP::Entry;
@@ -42,6 +46,12 @@ my %individuals = ();
 # The list of all contact informations (key = contactID)
 my %contacts = ();
 
+# The list of all pictures (key = pictureID)
+my %pictures = ();
+
+# The list of all places (key = placeID)
+my %places = ();
+
 # The list of all groups (with group name as a key)
 my %groups = ();
 
@@ -55,7 +65,7 @@ my %dn = ();
 sub check_dn($)
 {
 	local $_ = shift;
-	
+
 	if (exists $dn{$_})
 	{
 		croak('DN ' . $_ . 'already defined in this session. Program cannot process the data reliably, as DN definition mechanizm should be changed.');
@@ -74,12 +84,12 @@ sub fix_encoding($)
 sub get_contact_type_weight($)
 {
 	local $_ = shift;
-	
-	return 1 unless defined and length > 0;
-	return 1 if $_ eq 'Other';
-	return 3 if $_ eq 'PrimaryResidence';
-	return 2 if $_ eq 'TemporaryResidence';
-	return 0 if $_ eq 'WorkPlace';
+
+	return 5 unless defined and length > 0;
+	return 1 if $_ eq 'PrimaryResidence';
+	return 2 if $_ eq 'Other';
+	return 3 if $_ eq 'TemporaryResidence';
+	return 4 if $_ eq 'WorkPlace';
 
 	croak "The program should never reach here for value '$_'";
 }
@@ -98,29 +108,70 @@ sub trim($)
 
 #my $genoProApp = Win32::OLE->GetActiveObject('GenoPro.Application') or croak "Unable to connect to GenoPro instance. Make sure GenoPro is running.";
 #my $genoProApp = Win32::OLE->GetObject(encode("cp1251", '< D:/Documents/документы/контакты/контакты.gno')) or croak "Unable to create GenoPro instance. Make sure GenoPro is installed.";
-my $genoProApp = Win32::OLE->GetObject($genomap_file) or croak "Unable to create GenoPro instance. Make sure GenoPro is installed.";
+#my $genoProApp = Win32::OLE->GetObject($genomap_file) or croak "Unable to create GenoPro instance. Make sure GenoPro is installed.";
+
+my $genomap_zip = Archive::Zip->new();
+die "Unable to read ZIP file $genomap_file" unless $genomap_zip->read($genomap_file) == AZ_OK;
+die "ZIP file is empty" unless $genomap_zip->numberOfMembers();
 
 XML::Twig->new(
 	twig_handlers => {
 		'Individuals/Individual'	=> \&individual,
-		'Contacts/Contact'			=> \&contact
+		'Contacts/Contact'			=> \&contact,
+		'Pictures/Picture'			=> \&picture,
+		'Places/Place'				=> \&place
 	}
-)->parse(fix_encoding($genoProApp->GetTextXML()))->purge();
+)->parse(($genomap_zip->members())[0]->contents())->purge();
+#)->parse(fix_encoding($genoProApp->GetTextXML()))->purge();
 
-# Sort all contact information by relevance:
 while (local (undef, $_) = each %individuals)
 {
+	# Sort all contact information by relevance:
 	my @contacts = sort {
-		get_contact_type_weight($b->{'type'}) <=> get_contact_type_weight($a->{'type'})
+		get_contact_type_weight($a->{'type'}) <=> get_contact_type_weight($b->{'type'})
 	} map {
 		$contacts{$_} or croak "No contacts found for ID $_";
 	} @{$_->{'contacts'}};
-	
+
 	$_->{'contacts'} = \@contacts;
-	
+
+	# Define the group for individual:
 	foreach my $group (@{$_->{'groups'}})
 	{
 		push @{$groups{$group}}, $_;
+	}
+	
+	# Resolve the picture for individual:
+	if (defined $_->{'picture'})
+	{
+		$_->{'picture'} = $pictures{$_->{'picture'}};
+	}
+}
+
+# Merge the information from parent places:
+while (my ($place_id, $place) = each %places)
+{
+	my $parent_place_id = $place->{'parent'};
+
+	while (defined $parent_place_id)
+	{
+		if (!defined $places{$parent_place_id})
+		{
+			carp "Unable to parent place for place ID $place_id";
+			next;
+		}
+
+		while (my ($property_key, $property_value) = each %{$places{$parent_place_id}})
+		{
+			if (!defined $place->{$property_key})
+			{
+				$place->{$property_key} = $property_value;
+			}
+		}
+
+		$parent_place_id = $places{$parent_place_id}->{'parent'};
+
+		delete $places{$parent_place_id};
 	}
 }
 
@@ -158,14 +209,14 @@ while (my ($individual_id, $individual) = each %individuals)
 	{
 		if (defined $contact->{email})
 		{
-			if ($contact->{email} !~ /^([-\w]+)\s+([-\w. ]+)\s+<(.*)>$/)
-			{
-				carp "Unable to parse email $contact->{email} for individual $individual_id";
-				next;
-			}
-			
 			unless (defined $entry)
 			{
+				if ($contact->{email} !~ /^([-'\w]+)\s+([-'\w. ]+)\s+<(.*)>$/)
+				{
+					carp "Unable to parse email $contact->{email} for individual $individual_id";
+					next;
+				}
+
 				my $dn = "cn=$1 $2" . (defined $ldap_search_dn ? ',' . $ldap_search_dn : '');
 				
 				eval {
@@ -185,9 +236,9 @@ while (my ($individual_id, $individual) = each %individuals)
 						'objectClass' => [ qw(inetOrgPerson mozillaAbPersonAlpha) ]
 					);
 				}
-				
+
 				$individual->{'dn'} = $dn;
-				
+
 				check_dn($dn);
 
 				# Other attributes for adding or updating the entry:
@@ -195,7 +246,18 @@ while (my ($individual_id, $individual) = each %individuals)
 			}
 			else
 			{
-				$entry->replace('mozillaSecondEmail' => encode('MIME-Q', $3)) if !$entry->exists('mozillaSecondEmail');
+				if ($contact->{email} !~ /<(.*)>$/)
+				{
+					carp "Unable to parse email $contact->{email} for individual $individual_id";
+					next;
+				}
+
+				$entry->replace('mozillaSecondEmail' => encode('MIME-Q', $1)) if !$entry->exists('mozillaSecondEmail');
+				
+				if ($entry->get_value('mozillaSecondEmail') eq $entry->get_value('mail'))
+				{
+					$entry->delete('mozillaSecondEmail' => undef);
+				}
 			}
 		}
 	}
@@ -207,16 +269,52 @@ while (my ($individual_id, $individual) = each %individuals)
 	}
 
 	# Processing other attributes after the entry has been created:
-	
+
 	foreach my $contact (@{$individual->{'contacts'}})
 	{
 		$entry->replace('telephoneNumber'	=> $contact->{'telephone'})	if defined $contact->{'telephone'}	&& !$entry->exists('telephoneNumber');
 		$entry->replace('mobile'			=> $contact->{'mobile'})	if defined $contact->{'mobile'}		&& !$entry->exists('mobile');
 		$entry->replace('mozillaHomeUrl'	=> $contact->{'homepage'})	if defined $contact->{'homepage'}	&& !$entry->exists('mozillaHomeUrl');
+		
+		if (defined $contact->{'place'})
+		{
+			if ($contact->{'type'} eq 'WorkPlace')
+			{
+				$entry->replace('street'					=> $contact->{'place'}->{'street'})		if defined $contact->{'place'}->{'street'}	&& !$entry->exists('street');
+				$entry->replace('postalCode'				=> $contact->{'place'}->{'zip'})		if defined $contact->{'place'}->{'zip'}		&& !$entry->exists('postalCode');
+				$entry->replace('l'							=> $contact->{'place'}->{'city'})		if defined $contact->{'place'}->{'city'}	&& !$entry->exists('l');
+				$entry->replace('c'							=> $contact->{'place'}->{'country'})	if defined $contact->{'place'}->{'country'}	&& !$entry->exists('c');
+			}
+			else
+			{
+				$entry->replace('mozillaHomeStreet'			=> $contact->{'place'}->{'street'})		if defined $contact->{'place'}->{'street'}	&& !$entry->exists('mozillaHomeStreet');
+				$entry->replace('mozillaHomePostalCode'		=> $contact->{'place'}->{'zip'})		if defined $contact->{'place'}->{'zip'}		&& !$entry->exists('mozillaHomePostalCode');
+				$entry->replace('mozillaHomeLocalityName'	=> $contact->{'place'}->{'city'})		if defined $contact->{'place'}->{'city'}	&& !$entry->exists('mozillaHomeLocalityName');
+				$entry->replace('mozillaHomeCountryName'	=> $contact->{'place'}->{'country'})	if defined $contact->{'place'}->{'country'}	&& !$entry->exists('mozillaHomeCountryName');
+			}
+		}
 	}
 
 	$entry->replace('pager'					=> $individual->{'icq'})	if defined $individual->{'icq'};
 	
+	if (defined $individual->{'birth_date'})
+	{
+		if ($individual->{'birth_date'} =~ /(\d{1,2}) (\w{3,3})(?: (\d{4,4}))?/)
+		{
+			$entry->replace('birthyear'		=> $3) if defined $3;
+			$entry->replace('birthmonth'	=> Date::Calc::Decode_Month($2));
+			$entry->replace('birthday'		=> $1);
+		}
+	}
+
+	if (defined $individual->{'picture'})
+	{
+		local $/ = undef;
+		open IN, "<", encode("cp1251", $individual->{'picture'}) or die $!;
+		$entry->replace('jpegPhoto'			=> <IN>);
+		close IN;
+	}
+
 	if ($ldap)
 	{
 		print(($entry->changetype() eq 'add' ? "Adding " : "Updating ") . $entry->dn() . "\n");
@@ -247,17 +345,18 @@ while (my ($cn, $group) = each %groups)
 			'cn' => $cn
 		);
 	}
-
-	$entry->replace('member' => [ map { $_->{'dn'} } grep { defined $_->{'dn'} } @{$group} ]) ;
+	
+	my %saw;
+	$entry->replace('member' => [ map { $_->{'dn'} } grep { defined $_->{'dn'} && !$saw{$_->{'dn'}}++ } @{$group} ]) ;
 	
 	# No members for this group have been added to LDAP:
-	next unless scalar($entry->get('member'));
+	next unless scalar($entry->get_value('member'));
 	
 	check_dn($dn);
 	
 	if ($ldap)
 	{
-		print(($entry->changetype() eq 'add' ? "Adding " : "Updating ") . " group: $dn\n");
+		print(($entry->changetype() eq 'add' ? "Adding" : "Updating") . " group: $dn\n");
 	
 		$entry->update($ldap);
 	}
@@ -297,7 +396,7 @@ sub individual()
 		#carp('No contact information available for individual ' . $individual_id); 
 		return;
 	}
-	
+
 	my @contacts = split /\s*,\s*/, $contacts_node->text();
 
 	if (scalar(@contacts) == 0)
@@ -305,19 +404,32 @@ sub individual()
 		carp('Contact information list is empty for individual ' . $individual_id);
 		return;
 	}
-	
-	$individuals{$individual_id}->{'contacts'} = \@contacts;
-	
+
+	local $_ = {};
+	$individuals{$individual_id} = $_;
+	$_->{'contacts'} = \@contacts;
+
 	if (defined $map_name)
 	{
-		$individuals{$individual_id}->{'groups'} = [ $map_name ]; 
+		$_->{'groups'} = [ $map_name ]; 
+	}
+
+	# Custom tags:
+	foreach my $node_path (qw(Name ICQ Skype JabberId AIM Birth/Date))
+	{
+		my $property_value = $individual_node->findvalue($node_path);
+
+		my $property_name = $node_path;
+		$property_name =~ s/\//_/g;
+		
+		$_->{lc $property_name} = trim($property_value) if $property_value;
 	}
 	
-	# Custom tags:
-	foreach (qw(Name ICQ Skype JabberId AIM))
+	my $pictures_node = $individual_node->first_child('Pictures');
+	
+	if (defined $pictures_node)
 	{
-		my $property_node = $individual_node->first_child($_);
-		$individuals{$individual_id}->{lc $_} = trim($property_node->first_child_text()) if defined $property_node;
+		$_->{'picture'} = $pictures_node->att('Primary');
 	}
 }
 
@@ -328,11 +440,36 @@ sub contact()
 	my %properties = ();
 
 	$contacts{$contact_node->att('ID')} = \%properties;
-		
+
 	foreach (qw(Type Email Telephone Mobile Homepage))
 	{
-		my $property_node = $contact_node->first_child($_);
-		$properties{lc $_} = trim($property_node->first_child_text()) if defined $property_node;
+		my $property_value = $contact_node->findvalue($_);
+		$properties{lc $_} = trim($property_value) if $property_value;
+	}
+
+	my $place_id = $contact_node->findvalue('Place');
+	$properties{'place'} = $places{$place_id} if defined $places{$place_id};
+}
+
+sub picture()
+{
+	my ($twig, $picture_node) = @_;
+
+	$pictures{$picture_node->att('ID')} =  $picture_node->first_child('Path')->first_child_text();
+}
+
+sub place()
+{
+	my ($twig, $place_node) = @_;
+
+	my %properties = ();
+
+	$places{$place_node->att('ID')} = \%properties;
+
+	foreach (qw(Name Country City Street Zip Parent))
+	{
+		my $property_value = $place_node->findvalue($_);
+		$properties{lc $_} = trim($property_value) if $property_value;
 	}
 }
 
@@ -358,8 +495,8 @@ Prints this help message.
 
 =item B<--host|-h>
 
-Optionally specify the LDAP host to connect to. If not defined, the ldiff output is produced, which can be imported
-into LDAP directory 
+Optionally specify the LDAP host to connect to. If not defined, the data is printed to standard output in LDIFF format,
+which can be manually imported into LDAP directory.
 
 =item B<--search-dn|-S>
 
@@ -388,5 +525,19 @@ The program opens map file using GenoMap COM interface. The XML data is parsed a
 The program prints the resulting .ldiff to the screen, if no LDAP host is provided. Otherwise for each added
 individual it is checked, if the entry already exists in LDAP directory. If positive, the entry fields are
 updated, otherwise a new entry is added.
+
+=head1 LDAP Attributes Used by Thunderbird
+
+birthday o company mail modifytimestamp mozillaUseHtmlMail xmozillausehtmlmail mozillaCustom2 custom2
+mozillaHomeCountryName ou department departmentnumber orgunit mobile cellphone carphone telephoneNumber title
+mozillaCustom1 custom1 sn surname mozillaNickname xmozillanickname mozillaWorkUrl workurl labeledURI
+facsimiletelephonenumber fax mozillaSecondEmail xmozillasecondemail mozillaCustom4 custom4 nsAIMid nscpaimscreenname
+street streetaddress postOfficeBox givenName l locality homePhone mozillaHomeUrl homeurl mozillaHomeStreet st region
+mozillaHomePostalCode mozillaHomeLocalityName mozillaCustom3 custom3 birthyear mozillaWorkStreet2 mozillaHomeStreet2
+postalCode zip birthmonth c countryname pager pagerphone mozillaHomeState description notes cn commonname objectClass
+
+More information:
+http://wiki.mozilla.org/MailNews:Mozilla%20LDAP%20Address%20Book%20Schema
+http://www.mozilla.org/projects/thunderbird/specs/ldap.html
 
 =cut
