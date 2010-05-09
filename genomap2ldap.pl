@@ -1,5 +1,7 @@
 #!/usr/bin/perl
 
+# Tested on WindowsXP, GenoPro v2.0.1.6, ActivePerl v5.10.0 (XML::Twig v3.32, Net::LDAP v0.39)
+
 use strict;
 use utf8;
 
@@ -7,7 +9,6 @@ use Encode;
 
 use Carp;
 
-#use Win32::OLE;
 use Archive::Zip qw(:ERROR_CODES :CONSTANTS);
 
 use XML::Twig;
@@ -15,6 +16,7 @@ use Date::Calc;
 use Net::LDAP;
 use Net::LDAP::LDIF;
 use Net::LDAP::Entry;
+use File::Basename;
 
 use Getopt::Long qw(:config bundling);
 use Pod::Usage;
@@ -37,8 +39,6 @@ pod2usage(-verbose=>0, -exitval=>1) unless GetOptions(
 	'bind-dn|D=s'			=> \$ldap_bind_dn,
 	'bind-pass|w=s'			=> \$ldap_bind_pass,
 ) && defined $genomap_file;
-
-# Tested on WindowsXP, GenoPro v2.0.1.6, ActivePerl v5.10.0 (Win32::OLE v0.1709, XML::Twig v3.32, Net::LDAP v0.39)
 
 # The list of all individuals (key = individualID)
 my %individuals = ();
@@ -74,13 +74,6 @@ sub check_dn($)
 	$dn{$_} = 1;
 }
 
-sub fix_encoding($)
-{
-	local $_ = shift;
-	s/<\?xml version='1\.0' encoding='unicode'\?>/<?xml version='1.0' encoding='windows-1251'?>/;	
-	return $_;
-}
-
 sub get_contact_type_weight($)
 {
 	local $_ = shift;
@@ -106,10 +99,6 @@ sub trim($)
 # Document loading. XML Parsing
 ######################################
 
-#my $genoProApp = Win32::OLE->GetActiveObject('GenoPro.Application') or croak "Unable to connect to GenoPro instance. Make sure GenoPro is running.";
-#my $genoProApp = Win32::OLE->GetObject(encode("cp1251", '< D:/Documents/документы/контакты/контакты.gno')) or croak "Unable to create GenoPro instance. Make sure GenoPro is installed.";
-#my $genoProApp = Win32::OLE->GetObject($genomap_file) or croak "Unable to create GenoPro instance. Make sure GenoPro is installed.";
-
 my $genomap_zip = Archive::Zip->new();
 die "Unable to read ZIP file $genomap_file" unless $genomap_zip->read($genomap_file) == AZ_OK;
 die "ZIP file is empty" unless $genomap_zip->numberOfMembers();
@@ -122,7 +111,6 @@ XML::Twig->new(
 		'Places/Place'				=> \&place
 	}
 )->parse(($genomap_zip->members())[0]->contents())->purge();
-#)->parse(fix_encoding($genoProApp->GetTextXML()))->purge();
 
 while (local (undef, $_) = each %individuals)
 {
@@ -157,8 +145,8 @@ while (my ($place_id, $place) = each %places)
 	{
 		if (!defined $places{$parent_place_id})
 		{
-			carp "Unable to parent place for place ID $place_id";
-			next;
+			carp "Unable to locate parent place for '$parent_place_id'";
+			last;
 		}
 
 		while (my ($property_key, $property_value) = each %{$places{$parent_place_id}})
@@ -170,8 +158,6 @@ while (my ($place_id, $place) = each %places)
 		}
 
 		$parent_place_id = $places{$parent_place_id}->{'parent'};
-
-		delete $places{$parent_place_id};
 	}
 }
 
@@ -213,7 +199,7 @@ while (my ($individual_id, $individual) = each %individuals)
 			{
 				if ($contact->{email} !~ /^([-'\w]+)\s+([-'\w. ]+)\s+<(.*)>$/)
 				{
-					carp "Unable to parse email $contact->{email} for individual $individual_id";
+					carp "Unable to parse email $contact->{email} for individual '$individual_id'";
 					next;
 				}
 
@@ -310,8 +296,10 @@ while (my ($individual_id, $individual) = each %individuals)
 	if (defined $individual->{'picture'})
 	{
 		local $/ = undef;
-		open IN, "<", encode("cp1251", $individual->{'picture'}) or die $!;
-		$entry->replace('jpegPhoto'			=> <IN>);
+		local $_ = $individual->{'picture'};
+		s#\\#\/#g;
+		open IN, "<", (fileparse($genomap_file))[1] . encode("cp1251", $_) or die $!;
+		$entry->replace('jpegPhoto' => <IN>);
 		close IN;
 	}
 
@@ -427,6 +415,7 @@ sub individual()
 	
 	my $pictures_node = $individual_node->first_child('Pictures');
 	
+	# As pictures are parsed after individuals, we have to save the picture ID to resolve later:
 	if (defined $pictures_node)
 	{
 		$_->{'picture'} = $pictures_node->att('Primary');
@@ -455,7 +444,7 @@ sub picture()
 {
 	my ($twig, $picture_node) = @_;
 
-	$pictures{$picture_node->att('ID')} =  $picture_node->first_child('Path')->first_child_text();
+	$pictures{$picture_node->att('ID')} = $picture_node->first_child('Path')->att('Relative');
 }
 
 sub place()
@@ -482,8 +471,10 @@ genomap2ldap.pl - loads infromation about GenoMap individuals into LDAP director
 
 =head1 SYNOPSIS
 
-  copy_merger.pl -f genomap.gno [-h ldap.host.com] [-D bind_dn] [-w bind_password] [-S search_dn]
-  copy_merger.pl --help
+  genomap2ldap.pl -f genomap.gno [-h ldap.host.com] [-D bind_dn] [-w bind_password] [-S users_dn] [-G groups_dn]
+  genomap2ldap.pl --help
+
+  genomap2ldap.pl -f C:/Documents/myfile.gno -S cn=user,cn=domain -G cn=groups,cn=domain -h 192.168.1.5 -D cn=ldapadmin,cn=domain -w superUserPass
 
 =head1 OPTIONS
 
