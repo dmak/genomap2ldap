@@ -17,6 +17,7 @@ use Net::LDAP;
 use Net::LDAP::LDIF;
 use Net::LDAP::Entry;
 use File::Basename;
+use PerlIO::fse; # See http://stackoverflow.com/questions/2796127/what-is-the-universal-way-to-use-file-i-o-api-with-unicode-filenames
 
 use Getopt::Long qw(:config bundling);
 use Pod::Usage;
@@ -112,6 +113,10 @@ XML::Twig->new(
 	}
 )->parse(($genomap_zip->members())[0]->contents())->purge();
 
+# We should decode the command-line arguments:
+my $genomap_dir = decode(PerlIO::fse->get_fse(), (fileparse($genomap_file))[1]);
+$genomap_dir =~ s#\\#\/#g;
+
 while (local (undef, $_) = each %individuals)
 {
 	# Sort all contact information by relevance:
@@ -132,7 +137,7 @@ while (local (undef, $_) = each %individuals)
 	# Resolve the picture for individual:
 	if (defined $_->{'picture'})
 	{
-		$_->{'picture'} = $pictures{$_->{'picture'}};
+		$_->{'picture'} = $genomap_dir . $pictures{$_->{'picture'}};
 	}
 }
 
@@ -255,7 +260,6 @@ while (my ($individual_id, $individual) = each %individuals)
 	}
 
 	# Processing other attributes after the entry has been created:
-
 	foreach my $contact (@{$individual->{'contacts'}})
 	{
 		$entry->replace('telephoneNumber'	=> $contact->{'telephone'})	if defined $contact->{'telephone'}	&& !$entry->exists('telephoneNumber');
@@ -297,8 +301,7 @@ while (my ($individual_id, $individual) = each %individuals)
 	{
 		local $/ = undef;
 		local $_ = $individual->{'picture'};
-		s#\\#\/#g;
-		open IN, "<", (fileparse($genomap_file))[1] . encode("cp1251", $_) or die $!;
+		open IN, "<:fse", $_ or die "$_: $!"; # Automatically decode to codepage used by local filesystem.
 		$entry->replace('jpegPhoto' => <IN>);
 		close IN;
 	}
