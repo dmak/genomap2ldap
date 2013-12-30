@@ -1,7 +1,12 @@
 #!/usr/bin/perl
-
+#
 # Tested on WindowsXP, GenoPro v2.0.1.6, ActivePerl v5.10.0 (XML::Twig v3.32, Net::LDAP v0.39)
-
+#
+#	ppm install Net::LDAP PerlIO::fse
+# Prerequisites for XML::Twig:
+#	ppm install XML::XPath HTML::TreeBuilder Tie::IxHash
+#	perl -MCPAN -e "install XML::Twig"
+#
 use strict;
 use utf8;
 
@@ -11,7 +16,7 @@ use Carp;
 
 use Archive::Zip qw(:ERROR_CODES :CONSTANTS);
 
-use XML::Twig;
+use XML::Twig; # It's better to install optional XML::XPath, HTML::TreeBuilder, Tie::IxHash as well before installing XML::Twig
 use Date::Calc;
 use Net::LDAP;
 use Net::LDAP::LDIF;
@@ -23,13 +28,40 @@ use Getopt::Long qw(:config bundling);
 use Pod::Usage;
 
 # Used for debugging:
-#use Data::Dumper;
+use Data::Dumper;
+
+use constant INDIVIDUAL_DN			=> 'DN'; # LDAP Distinguished Name
+use constant INDIVIDUAL_NAME		=> 'Name'; # Not used in LDAP output
+use constant INDIVIDUAL_ICQ			=> 'ICQ';
+use constant INDIVIDUAL_SKYPE		=> 'Skype'; # Not used in LDAP output
+use constant INDIVIDUAL_JABBERID	=> 'JabberId'; # Not used in LDAP output
+use constant INDIVIDUAL_AIM			=> 'AIM'; # Not used in LDAP output
+use constant INDIVIDUAL_BIRTHDATE	=> 'BirthDate';
+use constant INDIVIDUAL_PICTURE		=> 'Picture';
+use constant INDIVIDUAL_CONTACTS	=> 'Contacts';
+use constant INDIVIDUAL_GROUPS		=> 'Groups';
+
+use constant CONTACT_TYPE			=> 'Type';
+use constant CONTACT_EMAIL			=> 'Email';
+use constant CONTACT_TELEPHONE		=> 'Telephone';
+use constant CONTACT_MOBILE			=> 'Mobile';
+use constant CONTACT_HOMEPAGE		=> 'Homepage';
+use constant CONTACT_PLACE			=> 'Place'; # Contains the reference to hashmap with place properties
+
+use constant PLACE_NAME				=> 'Name'; # Not used in LDAP output
+use constant PLACE_COUNTRY			=> 'Country';
+use constant PLACE_CITY				=> 'City';
+use constant PLACE_STREET			=> 'Street';
+use constant PLACE_ZIP				=> 'Zip';
+use constant PLACE_PARENT			=> 'Parent';
 
 binmode(STDOUT, ':utf8');
 binmode(STDERR, ':utf8');
 
 # Command-line arguments:
-my ($genomap_file, $ldap_host, $ldap_search_dn, $ldap_search_group_dn, $ldap_bind_dn, $ldap_bind_pass);
+my ($genomap_file, $ldap_host, $ldap_search_dn, $ldap_search_group_dn, $ldap_bind_dn, $ldap_bind_pass, $debug, $load_images);
+
+$load_images = 1;
 
 pod2usage(-verbose=>0, -exitval=>1) unless GetOptions(
 	'help'					=> sub { pod2usage(-verbose=>2, -noperldoc=>1, -exitval=>1); },
@@ -39,7 +71,17 @@ pod2usage(-verbose=>0, -exitval=>1) unless GetOptions(
 	'search-group-dn|G=s'	=> \$ldap_search_group_dn,
 	'bind-dn|D=s'			=> \$ldap_bind_dn,
 	'bind-pass|w=s'			=> \$ldap_bind_pass,
+	'verbose'				=> \$debug,
+	'load-images!'			=> \$load_images
 ) && defined $genomap_file;
+
+# List the properties of individual, which may be used to create URL:
+my %url_mappings = (
+	'LiveJournal'	=> 'http://%s.livejournal.com',
+	'MoiKrug'		=> 'http://%s.moikrug.ru',
+	'Twitter'		=> 'http://twitter.com/%s',
+	'Picasa'		=> 'http://picasaweb.google.com/%s'
+);
 
 # The list of all individuals (key = individualID)
 my %individuals = ();
@@ -53,7 +95,7 @@ my %pictures = ();
 # The list of all places (key = placeID)
 my %places = ();
 
-# The list of all groups (with group name as a key)
+# The list of all groups (with group name as a key and a collection of individuals as value)
 my %groups = ();
 
 # The list of all DNs in this session
@@ -121,30 +163,31 @@ while (local (undef, $_) = each %individuals)
 {
 	# Sort all contact information by relevance:
 	my @contacts = sort {
-		get_contact_type_weight($a->{'type'}) <=> get_contact_type_weight($b->{'type'})
+		get_contact_type_weight($a->{CONTACT_TYPE()}) <=> get_contact_type_weight($b->{CONTACT_TYPE()})
 	} map {
 		$contacts{$_} or croak "No contacts found for ID $_";
-	} @{$_->{'contacts'}};
+	} @{$_->{INDIVIDUAL_CONTACTS()}};
 
-	$_->{'contacts'} = \@contacts;
+	# Resove the array of contacts IDs to array of contacts properties:
+	$_->{INDIVIDUAL_CONTACTS()} = \@contacts;
 
-	# Define the group for individual:
-	foreach my $group (@{$_->{'groups'}})
+	# Place the given individual into all groups he belongs to:
+	foreach my $group (keys %{$_->{INDIVIDUAL_GROUPS()}})
 	{
 		push @{$groups{$group}}, $_;
 	}
 	
 	# Resolve the picture for individual:
-	if (defined $_->{'picture'})
+	if (defined $_->{INDIVIDUAL_PICTURE()})
 	{
-		$_->{'picture'} = $genomap_dir . $pictures{$_->{'picture'}};
+		$_->{INDIVIDUAL_PICTURE()} = $genomap_dir . $pictures{$_->{INDIVIDUAL_PICTURE()}};
 	}
 }
 
 # Merge the information from parent places:
 while (my ($place_id, $place) = each %places)
 {
-	my $parent_place_id = $place->{'parent'};
+	my $parent_place_id = $place->{PLACE_PARENT()};
 
 	while (defined $parent_place_id)
 	{
@@ -162,7 +205,7 @@ while (my ($place_id, $place) = each %places)
 			}
 		}
 
-		$parent_place_id = $places{$parent_place_id}->{'parent'};
+		$parent_place_id = $places{$parent_place_id}->{PLACE_PARENT()};
 	}
 }
 
@@ -196,15 +239,15 @@ while (my ($individual_id, $individual) = each %individuals)
 	my $entry;
 
 	# Contact information is already sorted by relevance:	
-	foreach my $contact (@{$individual->{'contacts'}})
+	foreach my $contact (@{$individual->{INDIVIDUAL_CONTACTS()}})
 	{
-		if (defined $contact->{email})
+		if (defined $contact->{CONTACT_EMAIL()})
 		{
 			unless (defined $entry)
 			{
-				if ($contact->{email} !~ /^([-'\w]+)\s+([-'\w. ]+)\s+<(.*)>$/)
+				if ($contact->{CONTACT_EMAIL()} !~ /^([-'\w]+)\s+([-'\w. ]+)\s+<(.*)>$/)
 				{
-					carp "Unable to parse email $contact->{email} for individual '$individual_id'";
+					carp "Unable to parse email $contact->{CONTACT_EMAIL()} for individual '$individual_id'";
 					next;
 				}
 
@@ -228,7 +271,7 @@ while (my ($individual_id, $individual) = each %individuals)
 					);
 				}
 
-				$individual->{'dn'} = $dn;
+				$individual->{INDIVIDUAL_DN()} = $dn;
 
 				check_dn($dn);
 
@@ -237,9 +280,9 @@ while (my ($individual_id, $individual) = each %individuals)
 			}
 			else
 			{
-				if ($contact->{email} !~ /<(.*)>$/)
+				if ($contact->{CONTACT_EMAIL()} !~ /<(.*)>$/)
 				{
-					carp "Unable to parse email $contact->{email} for individual $individual_id";
+					carp "Unable to parse email $contact->{CONTACT_EMAIL()} for individual $individual_id";
 					next;
 				}
 
@@ -247,7 +290,7 @@ while (my ($individual_id, $individual) = each %individuals)
 				
 				if ($entry->get_value('mozillaSecondEmail') eq $entry->get_value('mail'))
 				{
-					$entry->delete('mozillaSecondEmail' => undef);
+					$entry->replace('mozillaSecondEmail' => undef);
 				}
 			}
 		}
@@ -260,36 +303,55 @@ while (my ($individual_id, $individual) = each %individuals)
 	}
 
 	# Processing other attributes after the entry has been created:
-	foreach my $contact (@{$individual->{'contacts'}})
+	foreach my $contact (@{$individual->{INDIVIDUAL_CONTACTS()}})
 	{
-		$entry->replace('telephoneNumber'	=> $contact->{'telephone'})	if defined $contact->{'telephone'}	&& !$entry->exists('telephoneNumber');
-		$entry->replace('mobile'			=> $contact->{'mobile'})	if defined $contact->{'mobile'}		&& !$entry->exists('mobile');
-		$entry->replace('mozillaHomeUrl'	=> $contact->{'homepage'})	if defined $contact->{'homepage'}	&& !$entry->exists('mozillaHomeUrl');
 		
-		if (defined $contact->{'place'})
+		$entry->replace('telephoneNumber'	=> $contact->{CONTACT_TELEPHONE()})	if defined $contact->{CONTACT_TELEPHONE()}	&& !$entry->exists('telephoneNumber');
+		$entry->replace('mobile'			=> $contact->{CONTACT_MOBILE()})	if defined $contact->{CONTACT_MOBILE()}		&& !$entry->exists('mobile');
+		$entry->replace('mozillaHomeUrl'	=> $contact->{CONTACT_HOMEPAGE()})	if defined $contact->{CONTACT_HOMEPAGE()}	&& !$entry->exists('mozillaHomeUrl');
+		
+		if (defined $contact->{CONTACT_PLACE()})
 		{
-			if ($contact->{'type'} eq 'WorkPlace')
+			my ($street, $zip, $city, $country) = (
+				$contact->{CONTACT_PLACE()}->{PLACE_STREET()},
+				$contact->{CONTACT_PLACE()}->{PLACE_ZIP()},
+				$contact->{CONTACT_PLACE()}->{PLACE_CITY()},
+				$contact->{CONTACT_PLACE()}->{PLACE_COUNTRY()}
+			);
+			
+			if ($contact->{CONTACT_TYPE()} eq 'WorkPlace')
 			{
-				$entry->replace('street'					=> $contact->{'place'}->{'street'})		if defined $contact->{'place'}->{'street'}	&& !$entry->exists('street');
-				$entry->replace('postalCode'				=> $contact->{'place'}->{'zip'})		if defined $contact->{'place'}->{'zip'}		&& !$entry->exists('postalCode');
-				$entry->replace('l'							=> $contact->{'place'}->{'city'})		if defined $contact->{'place'}->{'city'}	&& !$entry->exists('l');
-				$entry->replace('c'							=> $contact->{'place'}->{'country'})	if defined $contact->{'place'}->{'country'}	&& !$entry->exists('c');
+				$entry->replace('street'					=> $street)		if defined $street;
+				$entry->replace('postalCode'				=> $zip)		if defined $zip;
+				$entry->replace('l'							=> $city)		if defined $city;
+				$entry->replace('c'							=> $country)	if defined $country;
 			}
 			else
 			{
-				$entry->replace('mozillaHomeStreet'			=> $contact->{'place'}->{'street'})		if defined $contact->{'place'}->{'street'}	&& !$entry->exists('mozillaHomeStreet');
-				$entry->replace('mozillaHomePostalCode'		=> $contact->{'place'}->{'zip'})		if defined $contact->{'place'}->{'zip'}		&& !$entry->exists('mozillaHomePostalCode');
-				$entry->replace('mozillaHomeLocalityName'	=> $contact->{'place'}->{'city'})		if defined $contact->{'place'}->{'city'}	&& !$entry->exists('mozillaHomeLocalityName');
-				$entry->replace('mozillaHomeCountryName'	=> $contact->{'place'}->{'country'})	if defined $contact->{'place'}->{'country'}	&& !$entry->exists('mozillaHomeCountryName');
+				$entry->replace('mozillaHomeStreet'			=> $street)		if defined $street;
+				$entry->replace('mozillaHomePostalCode'		=> $zip)		if defined $zip;
+				$entry->replace('mozillaHomeLocalityName'	=> $city)		if defined $city;
+				$entry->replace('mozillaHomeCountryName'	=> $country)	if defined $country;
+			}
+		}
+	}
+	
+	if (!$entry->exists('mozillaHomeUrl'))
+	{
+		while (my ($property_name, $url_format) = each %url_mappings)
+		{
+			if (defined $individual->{$property_name})
+			{
+				$entry->replace('mozillaHomeUrl'			=> sprintf($url_format, $individual->{$property_name}));
 			}
 		}
 	}
 
-	$entry->replace('pager'					=> $individual->{'icq'})	if defined $individual->{'icq'};
+	$entry->replace('pager'					=> $individual->{INDIVIDUAL_ICQ()})	if defined $individual->{INDIVIDUAL_ICQ()};
 	
-	if (defined $individual->{'birth_date'})
+	if (defined $individual->{INDIVIDUAL_BIRTHDATE()})
 	{
-		if ($individual->{'birth_date'} =~ /(\d{1,2}) (\w{3,3})(?: (\d{4,4}))?/)
+		if ($individual->{INDIVIDUAL_BIRTHDATE()} =~ /(\d{1,2}) (\w{3,3})(?: (\d{4,4}))?/)
 		{
 			$entry->replace('birthyear'		=> $3) if defined $3;
 			$entry->replace('birthmonth'	=> Date::Calc::Decode_Month($2));
@@ -297,10 +359,10 @@ while (my ($individual_id, $individual) = each %individuals)
 		}
 	}
 
-	if (defined $individual->{'picture'})
+	if (defined $individual->{INDIVIDUAL_PICTURE()})
 	{
 		local $/ = undef;
-		local $_ = $individual->{'picture'};
+		local $_ = $individual->{INDIVIDUAL_PICTURE()};
 		open IN, "<:fse", $_ or die "$_: $!"; # Automatically decode to codepage used by local filesystem.
 		$entry->replace('jpegPhoto' => <IN>);
 		close IN;
@@ -317,6 +379,9 @@ while (my ($individual_id, $individual) = each %individuals)
 	}
 }
 
+print Data::Dumper->Dump([\%individuals]) if $debug;
+
+# Dump the groups:
 while (my ($cn, $group) = each %groups)
 {
 	my $entry;
@@ -338,7 +403,7 @@ while (my ($cn, $group) = each %groups)
 	}
 	
 	my %saw;
-	$entry->replace('member' => [ map { $_->{'dn'} } grep { defined $_->{'dn'} && !$saw{$_->{'dn'}}++ } @{$group} ]) ;
+	$entry->replace('member' => [ map { $_->{INDIVIDUAL_DN()} } grep { defined $_->{INDIVIDUAL_DN()} && !$saw{$_->{INDIVIDUAL_DN()}}++ } @{$group} ]) ;
 	
 	# No members for this group have been added to LDAP:
 	next unless scalar($entry->get_value('member'));
@@ -375,7 +440,7 @@ sub individual()
 	# (e.g. $individual_link_id > $individual_id).
 	if (defined $individual_link_id)
 	{
-		push @{$individuals{$individual_link_id}->{'groups'}}, $map_name if defined $map_name;
+		$individuals{$individual_link_id}->{INDIVIDUAL_GROUPS()}->{$map_name} = 1 if defined $map_name;
 		return;	
 	}
 	
@@ -398,30 +463,33 @@ sub individual()
 
 	local $_ = {};
 	$individuals{$individual_id} = $_;
-	$_->{'contacts'} = \@contacts;
+	$_->{INDIVIDUAL_CONTACTS()} = \@contacts;
 
 	if (defined $map_name)
 	{
-		$_->{'groups'} = [ $map_name ]; 
+		$_->{INDIVIDUAL_GROUPS()}->{$map_name} = 1; 
 	}
 
 	# Custom tags:
-	foreach my $node_path (qw(Name ICQ Skype JabberId AIM Birth/Date))
+	foreach my $node_path (INDIVIDUAL_ICQ, INDIVIDUAL_SKYPE, INDIVIDUAL_JABBERID, INDIVIDUAL_AIM, 'Birth/Date', keys %url_mappings)
 	{
 		my $property_value = $individual_node->findvalue($node_path);
-
 		my $property_name = $node_path;
-		$property_name =~ s/\//_/g;
+
+		# The original node path "Birth/Date" is converted to property name "BirthDate":
+		$property_name =~ s/\///g;
 		
-		$_->{lc $property_name} = trim($property_value) if $property_value;
+		$_->{$property_name} = trim($property_value) if $property_value;
 	}
 	
+	$_->{INDIVIDUAL_NAME()} = trim($individual_node->first_child(INDIVIDUAL_NAME)->first_child_text());
+
 	my $pictures_node = $individual_node->first_child('Pictures');
-	
+
 	# As pictures are parsed after individuals, we have to save the picture ID to resolve later:
-	if (defined $pictures_node)
+	if ($load_images && defined $pictures_node)
 	{
-		$_->{'picture'} = $pictures_node->att('Primary');
+		$_->{INDIVIDUAL_PICTURE()} = $pictures_node->att('Primary');
 	}
 }
 
@@ -433,14 +501,14 @@ sub contact()
 
 	$contacts{$contact_node->att('ID')} = \%properties;
 
-	foreach (qw(Type Email Telephone Mobile Homepage))
+	foreach (CONTACT_TYPE, CONTACT_EMAIL, CONTACT_TELEPHONE, CONTACT_MOBILE, CONTACT_HOMEPAGE)
 	{
 		my $property_value = $contact_node->findvalue($_);
-		$properties{lc $_} = trim($property_value) if $property_value;
+		$properties{$_} = trim($property_value) if $property_value;
 	}
 
-	my $place_id = $contact_node->findvalue('Place');
-	$properties{'place'} = $places{$place_id} if defined $places{$place_id};
+	my $place_id = $contact_node->findvalue(CONTACT_PLACE);
+	$properties{CONTACT_PLACE()} = $places{$place_id} if defined $places{$place_id};
 }
 
 sub picture()
@@ -458,10 +526,10 @@ sub place()
 
 	$places{$place_node->att('ID')} = \%properties;
 
-	foreach (qw(Name Country City Street Zip Parent))
+	foreach (PLACE_NAME, PLACE_COUNTRY, PLACE_CITY, PLACE_STREET, PLACE_ZIP, PLACE_PARENT)
 	{
 		my $property_value = $place_node->findvalue($_);
-		$properties{lc $_} = trim($property_value) if $property_value;
+		$properties{$_} = trim($property_value) if $property_value;
 	}
 }
 
@@ -510,6 +578,10 @@ should be specified, otherwise the anonymous bind will take place.
 =item B<--bind-pass|-w>
 
 Optionally specify the bind password, which should be used during the authentication phase.
+
+=item B<--no-load-images>
+
+Do not load the images.
 
 =back
 
