@@ -3,7 +3,9 @@
 # Tested on WindowsXP, GenoPro v2.0.1.6, ActivePerl v5.10.0 (XML::Twig v3.32, Net::LDAP v0.39)
 #
 #	ppm install Net::LDAP PerlIO::fse
+#
 # Prerequisites for XML::Twig:
+#
 #	ppm install XML::XPath HTML::TreeBuilder Tie::IxHash
 #	perl -MCPAN -e "install XML::Twig"
 #
@@ -538,7 +540,7 @@ __END__
 
 =head1 NAME
 
-genomap2ldap.pl - loads infromation about GenoMap individuals into LDAP directory
+genomap2ldap.pl - loads information about GenoMap individuals into LDAP directory
 
 =head1 SYNOPSIS
 
@@ -587,10 +589,9 @@ Do not load the images.
 
 =head1 DESCRIPTION
 
-The program opens map file using GenoMap COM interface. The XML data is parsed and converted to .ldiff format.
-The program prints the resulting .ldiff to the screen, if no LDAP host is provided. Otherwise for each added
-individual it is checked, if the entry already exists in LDAP directory. If positive, the entry fields are
-updated, otherwise a new entry is added.
+The GenoMap XML data is parsed and converted to .ldiff format. The program prints the resulting .ldiff to the screen, if
+no LDAP host is provided. Otherwise for each added individual it is checked, if the entry already exists in LDAP
+directory. If positive, the entry fields are updated, otherwise a new entry is added.
 
 =head1 LDAP Attributes Used by Thunderbird
 
@@ -603,7 +604,9 @@ mozillaHomePostalCode mozillaHomeLocalityName mozillaCustom3 custom3 birthyear m
 postalCode zip birthmonth c countryname pager pagerphone mozillaHomeState description notes cn commonname objectClass
 
 More information:
-http://wiki.mozilla.org/MailNews:Mozilla%20LDAP%20Address%20Book%20Schema
-http://www.mozilla.org/projects/thunderbird/specs/ldap.html
+
+* http://wiki.mozilla.org/MailNews:Mozilla%20LDAP%20Address%20Book%20Schema
+* http://www.mozilla.org/projects/thunderbird/specs/ldap.html
+* http://www.genopro.com/
 
 =cut

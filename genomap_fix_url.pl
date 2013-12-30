@@ -39,7 +39,7 @@ my $twig = XML::Twig->new(
 	}
 );
 
-# All unsignificant whitespaces are discarded:
+# All insignificant whitespaces are discarded:
 my $genomap_zip_member = ($genomap_zip->members())[0];
 $twig->parse($genomap_zip_member->contents());
 
