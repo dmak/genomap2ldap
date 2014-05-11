@@ -50,7 +50,7 @@ use constant CONTACT_MOBILE			=> 'Mobile';
 use constant CONTACT_HOMEPAGE		=> 'Homepage';
 use constant CONTACT_PLACE			=> 'Place'; # Contains the reference to hashmap with place properties
 
-use constant PLACE_NAME				=> 'Name'; # Not used in LDAP output
+use constant PLACE_NAME				=> 'Name';
 use constant PLACE_COUNTRY			=> 'Country';
 use constant PLACE_CITY				=> 'City';
 use constant PLACE_STREET			=> 'Street';
@@ -314,7 +314,8 @@ while (my ($individual_id, $individual) = each %individuals)
 		
 		if (defined $contact->{CONTACT_PLACE()})
 		{
-			my ($street, $zip, $city, $country) = (
+			my ($name, $street, $zip, $city, $country) = (
+				$contact->{CONTACT_PLACE()}->{PLACE_NAME()},
 				$contact->{CONTACT_PLACE()}->{PLACE_STREET()},
 				$contact->{CONTACT_PLACE()}->{PLACE_ZIP()},
 				$contact->{CONTACT_PLACE()}->{PLACE_CITY()},
@@ -323,6 +324,7 @@ while (my ($individual_id, $individual) = each %individuals)
 			
 			if ($contact->{CONTACT_TYPE()} eq 'WorkPlace')
 			{
+				$entry->replace('o'							=> $name);
 				$entry->replace('street'					=> $street)		if defined $street;
 				$entry->replace('postalCode'				=> $zip)		if defined $zip;
 				$entry->replace('l'							=> $city)		if defined $city;
@@ -381,7 +383,7 @@ while (my ($individual_id, $individual) = each %individuals)
 	}
 }
 
-print Data::Dumper->Dump([\%individuals]) if $debug;
+print Data::Dumper->Dump([\%individuals], ['individuals']) if $debug;
 
 # Dump the groups:
 while (my ($cn, $group) = each %groups)
