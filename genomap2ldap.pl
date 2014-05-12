@@ -178,7 +178,7 @@ while (local (undef, $_) = each %individuals)
 	{
 		push @{$groups{$group}}, $_;
 	}
-	
+
 	# Resolve the picture for individual:
 	if (defined $_->{INDIVIDUAL_PICTURE()})
 	{
@@ -254,7 +254,7 @@ while (my ($individual_id, $individual) = each %individuals)
 				}
 
 				my $dn = "cn=$1 $2" . (defined $ldap_search_dn ? ',' . $ldap_search_dn : '');
-				
+
 				eval {
 					$entry = $ldap->search('base' => $dn, 'filter' => '(objectClass=person)', 'scope' => 'base', 'sizelimit' => 1)->pop_entry()
 				} if $ldap;
@@ -289,7 +289,7 @@ while (my ($individual_id, $individual) = each %individuals)
 				}
 
 				$entry->replace('mozillaSecondEmail' => encode('MIME-Q', $1)) if !$entry->exists('mozillaSecondEmail');
-				
+
 				if ($entry->get_value('mozillaSecondEmail') eq $entry->get_value('mail'))
 				{
 					$entry->replace('mozillaSecondEmail' => undef);
@@ -307,11 +307,24 @@ while (my ($individual_id, $individual) = each %individuals)
 	# Processing other attributes after the entry has been created:
 	foreach my $contact (@{$individual->{INDIVIDUAL_CONTACTS()}})
 	{
-		
-		$entry->replace('telephoneNumber'	=> $contact->{CONTACT_TELEPHONE()})	if defined $contact->{CONTACT_TELEPHONE()}	&& !$entry->exists('telephoneNumber');
-		$entry->replace('mobile'			=> $contact->{CONTACT_MOBILE()})	if defined $contact->{CONTACT_MOBILE()}		&& !$entry->exists('mobile');
-		$entry->replace('mozillaHomeUrl'	=> $contact->{CONTACT_HOMEPAGE()})	if defined $contact->{CONTACT_HOMEPAGE()}	&& !$entry->exists('mozillaHomeUrl');
-		
+		my ($url, $phone, $mobile) = (
+			$contact->{CONTACT_HOMEPAGE()},
+			$contact->{CONTACT_TELEPHONE()},
+			$contact->{CONTACT_MOBILE()}
+		);
+
+		$entry->replace('mozillaHomeUrl'		=> $url)	if defined $url		&& !$entry->exists('mozillaHomeUrl');
+
+		if ($contact->{CONTACT_TYPE()} eq 'WorkPlace')
+		{
+			$entry->replace('telephoneNumber'	=> $phone)	if defined $phone	&& !$entry->exists('telephoneNumber');
+		}
+		else
+		{
+			$entry->replace('mobile'			=> $mobile)	if defined $mobile	&& !$entry->exists('mobile');
+			$entry->replace('homePhone'			=> $phone)	if defined $phone	&& !$entry->exists('homePhone');
+		}
+
 		if (defined $contact->{CONTACT_PLACE()})
 		{
 			my ($name, $street, $zip, $city, $country) = (
@@ -321,7 +334,7 @@ while (my ($individual_id, $individual) = each %individuals)
 				$contact->{CONTACT_PLACE()}->{PLACE_CITY()},
 				$contact->{CONTACT_PLACE()}->{PLACE_COUNTRY()}
 			);
-			
+
 			if ($contact->{CONTACT_TYPE()} eq 'WorkPlace')
 			{
 				$entry->replace('o'							=> $name);
@@ -339,7 +352,7 @@ while (my ($individual_id, $individual) = each %individuals)
 			}
 		}
 	}
-	
+
 	if (!$entry->exists('mozillaHomeUrl'))
 	{
 		while (my ($property_name, $url_format) = each %url_mappings)
@@ -352,7 +365,7 @@ while (my ($individual_id, $individual) = each %individuals)
 	}
 
 	$entry->replace('pager'					=> $individual->{INDIVIDUAL_ICQ()})	if defined $individual->{INDIVIDUAL_ICQ()};
-	
+
 	if (defined $individual->{INDIVIDUAL_BIRTHDATE()})
 	{
 		if ($individual->{INDIVIDUAL_BIRTHDATE()} =~ /(\d{1,2}) (\w{3,3})(?: (\d{4,4}))?/)
@@ -399,25 +412,25 @@ while (my ($cn, $group) = each %groups)
 	unless (defined $entry)
 	{ 
 		$entry = Net::LDAP::Entry->new($dn);
-	
+
 		$entry->add(
 			'objectclass' => 'groupOfNames',
 			'cn' => $cn
 		);
 	}
-	
+
 	my %saw;
 	$entry->replace('member' => [ map { $_->{INDIVIDUAL_DN()} } grep { defined $_->{INDIVIDUAL_DN()} && !$saw{$_->{INDIVIDUAL_DN()}}++ } @{$group} ]) ;
-	
+
 	# No members for this group have been added to LDAP:
 	next unless scalar($entry->get_value('member'));
-	
+
 	check_dn($dn);
-	
+
 	if ($ldap)
 	{
 		print(($entry->changetype() eq 'add' ? "Adding" : "Updating") . " group: $dn\n");
-	
+
 		$entry->update($ldap);
 	}
 	else
@@ -435,10 +448,10 @@ $ldap->unbind() if $ldap;
 sub individual()
 {
 	my ($twig, $individual_node) = @_;
-	
+
 	my $map_name = $individual_node->first_child('Position')->att('GenoMap');
 	my $individual_link_id = $individual_node->att('IndividualInternalHyperlink');
-	
+
 	# If this individual is actually a link, we add a map name to the list of groups.
 	# It is assumed, that linked individuals go in XML later than individuals they refer to
 	# (e.g. $individual_link_id > $individual_id).
@@ -447,7 +460,7 @@ sub individual()
 		$individuals{$individual_link_id}->{INDIVIDUAL_GROUPS()}->{$map_name} = 1 if defined $map_name;
 		return;	
 	}
-	
+
 	my $individual_id = $individual_node->att('ID');
 	my $contacts_node = $individual_node->first_child('Contacts');
 
@@ -482,10 +495,10 @@ sub individual()
 
 		# The original node path "Birth/Date" is converted to property name "BirthDate":
 		$property_name =~ s/\///g;
-		
+
 		$_->{$property_name} = trim($property_value) if $property_value;
 	}
-	
+
 	$_->{INDIVIDUAL_NAME()} = trim($individual_node->first_child(INDIVIDUAL_NAME)->first_child_text());
 
 	my $pictures_node = $individual_node->first_child('Pictures');
@@ -508,7 +521,7 @@ sub contact()
 	foreach (CONTACT_TYPE, CONTACT_EMAIL, CONTACT_TELEPHONE, CONTACT_MOBILE, CONTACT_HOMEPAGE)
 	{
 		my $property_value = $contact_node->findvalue($_);
-		$properties{$_} = trim($property_value) if $property_value;
+		$properties{$_} = trim($property_value) if $property_value && length($property_value) > 0;
 	}
 
 	my $place_id = $contact_node->findvalue(CONTACT_PLACE);
